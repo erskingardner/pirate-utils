@@ -10,6 +10,7 @@
 # - PostgreSQL (APT signed packages)
 # - ClickHouse (APT signed packages)
 # - SQLite (APT signed packages)
+# - Docker (APT signed packages with Docker Compose)
 #
 # Security features:
 # - All downloads over HTTPS with TLS 1.2+
@@ -320,7 +321,75 @@ fi
 log_info "SQLite setup complete"
 
 ###############################################################################
-# 8. Final cleanup and summary
+# 8. Install Docker
+###############################################################################
+log_info "Checking Docker installation..."
+
+if command -v docker &> /dev/null; then
+    log_info "Docker already installed"
+    DOCKER_VERSION=$(docker --version)
+    log_info "Current version: $DOCKER_VERSION"
+else
+    log_info "Installing Docker..."
+
+    # Install prerequisites
+    apt-get install -y ca-certificates curl gnupg lsb-release
+
+    # Add Docker's official GPG key
+    mkdir -p /etc/apt/keyrings
+    if [ ! -f /etc/apt/keyrings/docker.gpg ]; then
+        log_info "Adding Docker GPG key..."
+        curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+        chmod a+r /etc/apt/keyrings/docker.gpg
+    else
+        log_info "Docker GPG key already present"
+    fi
+
+    # Add Docker repository
+    if [ ! -f /etc/apt/sources.list.d/docker.list ]; then
+        log_info "Adding Docker repository..."
+        echo \
+          "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian \
+          $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+    else
+        log_info "Docker repository already configured"
+    fi
+
+    # Install Docker Engine
+    apt-get update
+    apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+
+    log_info "Docker installed successfully"
+fi
+
+# Ensure Docker service is started and enabled (idempotent)
+if systemctl is-active --quiet docker; then
+    log_info "Docker service already running"
+else
+    log_info "Starting Docker service..."
+    systemctl start docker
+fi
+
+if systemctl is-enabled --quiet docker; then
+    log_info "Docker service already enabled"
+else
+    log_info "Enabling Docker service..."
+    systemctl enable docker
+fi
+
+# Add user to docker group if not already a member
+if groups "$ACTUAL_USER" | grep -q '\bdocker\b'; then
+    log_info "User $ACTUAL_USER already in docker group"
+else
+    log_info "Adding user $ACTUAL_USER to docker group..."
+    usermod -aG docker "$ACTUAL_USER"
+    log_warn "User $ACTUAL_USER added to docker group. Log out and back in for this to take effect."
+fi
+
+log_info "Docker setup complete"
+
+###############################################################################
+# 9. Final cleanup and summary
 ###############################################################################
 log_info "Cleaning up..."
 apt-get autoremove -y
@@ -342,6 +411,7 @@ echo "✓ Rust toolchain installed"
 echo "✓ PostgreSQL installed and running"
 echo "✓ ClickHouse installed and running"
 echo "✓ SQLite installed"
+echo "✓ Docker installed and running"
 echo ""
 echo "------------------------------------------------------------------------"
 echo "IMPORTANT NOTES:"
@@ -351,22 +421,30 @@ echo "1. Shell Changes:"
 echo "   - Default shell changed to zsh for user: $ACTUAL_USER"
 echo "   - Log out and log back in for shell changes to take effect"
 echo ""
-echo "2. PostgreSQL:"
+echo "2. Docker:"
+echo "   - Service: systemctl status docker"
+echo "   - User $ACTUAL_USER added to docker group"
+echo "   - Log out and back in to use docker without sudo"
+echo "   - Test: docker run hello-world"
+echo "   - Docker Compose: docker compose (plugin)"
+echo ""
+echo "3. PostgreSQL:"
 echo "   - Service: systemctl status postgresql"
 echo "   - Access: sudo -u postgres psql"
 echo "   - Create user: sudo -u postgres createuser --interactive"
 echo ""
-echo "3. ClickHouse:"
+echo "4. ClickHouse:"
 echo "   - Service: systemctl status clickhouse-server"
 echo "   - Access: clickhouse-client"
 echo "   - Config: /etc/clickhouse-server/config.xml"
 echo ""
-echo "4. Rust:"
+echo "5. Rust:"
 echo "   - Installed for user: $ACTUAL_USER"
 echo "   - Tools: rustc, cargo, rustfmt, clippy, rust-analyzer"
 echo "   - Update: rustup update"
 echo ""
-echo "5. Services Status:"
+echo "6. Services Status:"
+systemctl is-active docker && echo "   - Docker: ✓ Running" || echo "   - Docker: ✗ Not running"
 systemctl is-active postgresql && echo "   - PostgreSQL: ✓ Running" || echo "   - PostgreSQL: ✗ Not running"
 systemctl is-active clickhouse-server && echo "   - ClickHouse: ✓ Running" || echo "   - ClickHouse: ✗ Not running"
 echo ""
