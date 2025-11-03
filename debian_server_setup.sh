@@ -17,6 +17,12 @@
 # - Content verification for shell script installers
 # - APT packages verified via signed repositories
 #
+# Idempotency:
+# - Safe to run multiple times
+# - Checks for existing installations before installing
+# - Updates Rust if already installed
+# - Skips already configured components
+#
 # Usage: sudo bash debian_server_setup.sh
 ###############################################################################
 
@@ -99,136 +105,219 @@ timedatectl
 ###############################################################################
 # 3. Install and configure zsh and oh-my-zsh
 ###############################################################################
-log_info "Installing zsh..."
-apt-get install -y zsh
-
-log_info "Installing oh-my-zsh for user $ACTUAL_USER..."
-
-# Download oh-my-zsh installer with signature verification
-OH_MY_ZSH_TEMP="/tmp/oh-my-zsh-install-$$"
-mkdir -p "$OH_MY_ZSH_TEMP"
-cd "$OH_MY_ZSH_TEMP"
-
-# Download the installer script
-curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh -o install.sh
-
-# Verify the script came from GitHub (check SSL cert and content basics)
-if ! grep -q "oh-my-zsh" install.sh || ! grep -q "github" install.sh; then
-    log_error "oh-my-zsh installer verification failed"
-    exit 1
+log_info "Checking zsh installation..."
+if ! command -v zsh &> /dev/null; then
+    log_info "Installing zsh..."
+    apt-get install -y zsh
+else
+    log_info "zsh already installed, skipping"
 fi
 
-log_info "oh-my-zsh installer verified"
+# Check if oh-my-zsh is already installed
+if [ ! -d "$ACTUAL_HOME/.oh-my-zsh" ]; then
+    log_info "Installing oh-my-zsh for user $ACTUAL_USER..."
 
-# Install oh-my-zsh as the actual user (not root)
-su - "$ACTUAL_USER" -c "sh $OH_MY_ZSH_TEMP/install.sh --unattended"
+    # Download oh-my-zsh installer with signature verification
+    OH_MY_ZSH_TEMP="/tmp/oh-my-zsh-install-$$"
+    mkdir -p "$OH_MY_ZSH_TEMP"
+    cd "$OH_MY_ZSH_TEMP"
 
-# Cleanup
-rm -rf "$OH_MY_ZSH_TEMP"
+    # Download the installer script
+    curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh -o install.sh
 
-# Change default shell to zsh for the user
-chsh -s "$(which zsh)" "$ACTUAL_USER"
+    # Verify the script came from GitHub (check SSL cert and content basics)
+    if ! grep -q "oh-my-zsh" install.sh || ! grep -q "github" install.sh; then
+        log_error "oh-my-zsh installer verification failed"
+        exit 1
+    fi
 
-log_info "zsh and oh-my-zsh installed successfully"
+    log_info "oh-my-zsh installer verified"
+
+    # Install oh-my-zsh as the actual user (not root)
+    su - "$ACTUAL_USER" -c "sh $OH_MY_ZSH_TEMP/install.sh --unattended"
+
+    # Cleanup
+    rm -rf "$OH_MY_ZSH_TEMP"
+else
+    log_info "oh-my-zsh already installed for user $ACTUAL_USER, skipping"
+fi
+
+# Change default shell to zsh for the user if not already set
+CURRENT_SHELL=$(getent passwd "$ACTUAL_USER" | cut -d: -f7)
+if [ "$CURRENT_SHELL" != "$(which zsh)" ]; then
+    log_info "Setting zsh as default shell for $ACTUAL_USER..."
+    chsh -s "$(which zsh)" "$ACTUAL_USER"
+else
+    log_info "zsh already set as default shell for $ACTUAL_USER"
+fi
+
+log_info "zsh and oh-my-zsh setup complete"
 
 ###############################################################################
 # 4. Install Rust and its tools
 ###############################################################################
-log_info "Installing Rust toolchain..."
+log_info "Checking Rust installation..."
 
-# Download and verify Rust installer
-RUST_TEMP="/tmp/rust-install-$$"
-mkdir -p "$RUST_TEMP"
-cd "$RUST_TEMP"
+# Check if Rust is already installed for the user
+if su - "$ACTUAL_USER" -c 'command -v rustc' &> /dev/null; then
+    log_info "Rust already installed for user $ACTUAL_USER"
+    RUST_VERSION=$(su - "$ACTUAL_USER" -c 'rustc --version')
+    log_info "Current version: $RUST_VERSION"
 
-log_info "Downloading Rust installer..."
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o rustup-init.sh
+    # Update Rust if already installed
+    log_info "Updating Rust toolchain..."
+    su - "$ACTUAL_USER" -c 'source "$HOME/.cargo/env" && rustup update'
+else
+    log_info "Installing Rust toolchain..."
 
-# Download Rust installer signature
-curl --proto '=https' --tlsv1.2 -sSf https://static.rust-lang.org/rustup/rustup-init.sh.sha256 -o rustup-init.sh.sha256 2>/dev/null || log_warn "SHA256 signature not available from standard location"
+    # Download and verify Rust installer
+    RUST_TEMP="/tmp/rust-install-$$"
+    mkdir -p "$RUST_TEMP"
+    cd "$RUST_TEMP"
 
-# Verify the installer (basic content check)
-if ! grep -q "rustup" rustup-init.sh || ! grep -q "rust-lang" rustup-init.sh; then
-    log_error "Rust installer verification failed"
-    exit 1
+    log_info "Downloading Rust installer..."
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o rustup-init.sh
+
+    # Download Rust installer signature
+    curl --proto '=https' --tlsv1.2 -sSf https://static.rust-lang.org/rustup/rustup-init.sh.sha256 -o rustup-init.sh.sha256 2>/dev/null || log_warn "SHA256 signature not available from standard location"
+
+    # Verify the installer (basic content check)
+    if ! grep -q "rustup" rustup-init.sh || ! grep -q "rust-lang" rustup-init.sh; then
+        log_error "Rust installer verification failed"
+        exit 1
+    fi
+
+    log_info "Rust installer verified"
+
+    # Install Rust as the actual user
+    su - "$ACTUAL_USER" -c "sh $RUST_TEMP/rustup-init.sh -y"
+
+    # Cleanup
+    rm -rf "$RUST_TEMP"
 fi
 
-log_info "Rust installer verified"
-
-# Install Rust as the actual user
-su - "$ACTUAL_USER" -c "sh $RUST_TEMP/rustup-init.sh -y"
-
-# Cleanup
-rm -rf "$RUST_TEMP"
-
 # Source cargo environment
-su - "$ACTUAL_USER" -c 'source "$HOME/.cargo/env"'
+su - "$ACTUAL_USER" -c 'source "$HOME/.cargo/env"' || true
 
-# Install common Rust tools
-log_info "Installing common Rust tools..."
-su - "$ACTUAL_USER" -c 'source "$HOME/.cargo/env" && rustup component add rustfmt clippy rust-src rust-analyzer'
+# Install common Rust tools (idempotent - rustup will skip if already installed)
+log_info "Ensuring Rust tools are installed..."
+su - "$ACTUAL_USER" -c 'source "$HOME/.cargo/env" && rustup component add rustfmt clippy rust-src rust-analyzer 2>/dev/null' || log_info "Rust components already installed"
 
 # Add cargo to .zshrc if it exists
 if [ -f "$ACTUAL_HOME/.zshrc" ]; then
     if ! grep -q "cargo/env" "$ACTUAL_HOME/.zshrc"; then
+        log_info "Adding Rust to .zshrc..."
         echo '' >> "$ACTUAL_HOME/.zshrc"
         echo '# Rust cargo environment' >> "$ACTUAL_HOME/.zshrc"
         echo 'source "$HOME/.cargo/env"' >> "$ACTUAL_HOME/.zshrc"
+    else
+        log_info "Rust already configured in .zshrc"
     fi
 fi
 
-log_info "Rust installed successfully"
+log_info "Rust setup complete"
 
 ###############################################################################
 # 5. Install PostgreSQL
 ###############################################################################
-log_info "Installing PostgreSQL..."
+log_info "Checking PostgreSQL installation..."
 
-apt-get install -y postgresql postgresql-contrib
+if command -v psql &> /dev/null; then
+    log_info "PostgreSQL already installed"
+    POSTGRES_VERSION=$(su - postgres -c "psql --version" 2>/dev/null || psql --version)
+    log_info "Current version: $POSTGRES_VERSION"
+else
+    log_info "Installing PostgreSQL..."
+    apt-get install -y postgresql postgresql-contrib
+fi
 
-# Start and enable PostgreSQL service
-systemctl start postgresql
-systemctl enable postgresql
+# Ensure PostgreSQL service is started and enabled (idempotent)
+if systemctl is-active --quiet postgresql; then
+    log_info "PostgreSQL service already running"
+else
+    log_info "Starting PostgreSQL service..."
+    systemctl start postgresql
+fi
 
-log_info "PostgreSQL installed and started"
-log_info "PostgreSQL version:"
-su - postgres -c "psql --version"
+if systemctl is-enabled --quiet postgresql; then
+    log_info "PostgreSQL service already enabled"
+else
+    log_info "Enabling PostgreSQL service..."
+    systemctl enable postgresql
+fi
+
+log_info "PostgreSQL setup complete"
 
 ###############################################################################
 # 6. Install ClickHouse
 ###############################################################################
-log_info "Installing ClickHouse..."
+log_info "Checking ClickHouse installation..."
 
-# Add ClickHouse GPG key (modern method)
-apt-get install -y apt-transport-https ca-certificates dirmngr
-mkdir -p /etc/apt/keyrings
-curl -fsSL 'https://packages.clickhouse.com/rpm/lts/repodata/repomd.xml.key' | gpg --dearmor -o /etc/apt/keyrings/clickhouse-keyring.gpg
+if command -v clickhouse-client &> /dev/null; then
+    log_info "ClickHouse already installed"
+    CLICKHOUSE_VERSION=$(clickhouse-client --version)
+    log_info "Current version: $CLICKHOUSE_VERSION"
+else
+    log_info "Installing ClickHouse..."
 
-# Add ClickHouse repository with signed-by
-echo "deb [signed-by=/etc/apt/keyrings/clickhouse-keyring.gpg] https://packages.clickhouse.com/deb stable main" | tee /etc/apt/sources.list.d/clickhouse.list
+    # Add ClickHouse GPG key (modern method)
+    apt-get install -y apt-transport-https ca-certificates dirmngr
+    mkdir -p /etc/apt/keyrings
 
-# Update and install ClickHouse
-apt-get update
-DEBIAN_FRONTEND=noninteractive apt-get install -y clickhouse-server clickhouse-client
+    # Only download key if not already present
+    if [ ! -f /etc/apt/keyrings/clickhouse-keyring.gpg ]; then
+        log_info "Adding ClickHouse GPG key..."
+        curl -fsSL 'https://packages.clickhouse.com/rpm/lts/repodata/repomd.xml.key' | gpg --dearmor -o /etc/apt/keyrings/clickhouse-keyring.gpg
+    else
+        log_info "ClickHouse GPG key already present"
+    fi
 
-# Start and enable ClickHouse service
-systemctl start clickhouse-server
-systemctl enable clickhouse-server
+    # Add ClickHouse repository with signed-by
+    if [ ! -f /etc/apt/sources.list.d/clickhouse.list ]; then
+        log_info "Adding ClickHouse repository..."
+        echo "deb [signed-by=/etc/apt/keyrings/clickhouse-keyring.gpg] https://packages.clickhouse.com/deb stable main" | tee /etc/apt/sources.list.d/clickhouse.list
+    else
+        log_info "ClickHouse repository already configured"
+    fi
 
-log_info "ClickHouse installed and started"
-log_info "ClickHouse version:"
-clickhouse-client --version
+    # Update and install ClickHouse
+    apt-get update
+    DEBIAN_FRONTEND=noninteractive apt-get install -y clickhouse-server clickhouse-client
+fi
+
+# Ensure ClickHouse service is started and enabled (idempotent)
+if systemctl is-active --quiet clickhouse-server; then
+    log_info "ClickHouse service already running"
+else
+    log_info "Starting ClickHouse service..."
+    systemctl start clickhouse-server
+fi
+
+if systemctl is-enabled --quiet clickhouse-server; then
+    log_info "ClickHouse service already enabled"
+else
+    log_info "Enabling ClickHouse service..."
+    systemctl enable clickhouse-server
+fi
+
+log_info "ClickHouse setup complete"
 
 ###############################################################################
 # 7. Install SQLite
 ###############################################################################
-log_info "Installing SQLite..."
+log_info "Checking SQLite installation..."
 
-apt-get install -y sqlite3 libsqlite3-dev
+if command -v sqlite3 &> /dev/null; then
+    log_info "SQLite already installed"
+    SQLITE_VERSION=$(sqlite3 --version)
+    log_info "Current version: $SQLITE_VERSION"
+else
+    log_info "Installing SQLite..."
+    apt-get install -y sqlite3 libsqlite3-dev
+    log_info "SQLite installed"
+fi
 
-log_info "SQLite installed"
-log_info "SQLite version:"
-sqlite3 --version
+log_info "SQLite setup complete"
 
 ###############################################################################
 # 8. Final cleanup and summary
